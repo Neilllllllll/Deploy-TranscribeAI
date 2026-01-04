@@ -1,0 +1,111 @@
+# Variable d'env communes à l'api et au worker
+x-common-variables: &common-variables
+    # On reconstruit l'URL à partir des variables individuelles du .env
+    DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+    SECRET_KEY: ${API_SECRET_KEY}
+    REDIS_URL: redis://${REDIS_HOST}:${REDIS_PORT}/0
+    AUDIO_STORAGE_PATH: ${AUDIO_STORAGE_PATH}
+
+services:
+  reverse-proxy:
+    build:
+      context: ./Reverse-Proxy-TranscribeAI
+    container_name: reverse-proxy
+    ports:
+      - "5001:80"
+    networks:
+      - my-network
+    depends_on:
+      - frontend
+      - api
+
+  frontend:
+    build:
+      context: ./Frontend-TranscribeAI
+      args:
+        - REACT_APP_API_KEY=${FRONTEND_API_KEY}
+    container_name: frontend
+    networks:
+      - my-network
+
+  postgres:
+    image: postgres:latest
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    networks:
+      - my-network
+
+  redis:
+    image: redis:latest
+    container_name: redis-queue
+    networks:
+      - my-network
+
+  api:
+    build:
+      context: ./Backend-TranscribeAI
+      dockerfile: Dockerfile.api
+    container_name: api
+    environment:
+      <<: *common-variables
+      FRONTEND_URL: ${FRONTEND_URL}
+    volumes:
+      - audio_data:${AUDIO_STORAGE_PATH}
+    networks:
+      - my-network
+    restart: on-failure
+    depends_on:
+      - postgres
+      - redis
+
+  batch-worker:
+    build:
+      context: ./Backend-TranscribeAI
+      dockerfile: Dockerfile.worker
+    container_name: batch-worker
+    environment:
+      <<: *common-variables
+      PYTHONUNBUFFERED: 1
+      WHISPER_SERVICE_URL: ${WHISPER_SERVICE_URL}
+    volumes:
+      - audio_data:${AUDIO_STORAGE_PATH}
+    networks:
+      - my-network
+    restart: on-failure
+    depends_on:
+      - postgres
+      - redis
+      - batch-transcription
+
+  batch-transcription:
+    build:
+      context: ./whisperservice-transcribeAI
+      dockerfile: Dockerfile.50GPU
+    container_name: batch-transcription
+    environment:
+      - ASR_MODEL_PATH=${WHISPER_MODEL_PATH}
+      - ASR_MODEL_NAME=${WHISPER_MODEL_NAME}
+    volumes:
+      - ${LOCAL_MODELS_DIR}:${WHISPER_MODEL_PATH}
+    networks:
+      - my-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  my-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  audio_data:
